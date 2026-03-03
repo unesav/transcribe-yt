@@ -73,7 +73,7 @@ def fetch_via_cf_tracks(video_id, lang):
     import requests
     from xml.etree import ElementTree
     
-    # Step 1: Get tracks from CF Worker
+    # Step 1: Get tracks + session cookies from CF Worker
     resp = requests.get(f"{CF_WORKER_URL}/", params={"videoId": video_id, "mode": "tracks"}, timeout=15)
     resp.raise_for_status()
     data = resp.json()
@@ -82,6 +82,7 @@ def fetch_via_cf_tracks(video_id, lang):
         raise Exception(data["error"])
     
     tracks = data.get("tracks", [])
+    yt_cookies = data.get("cookies", "")  # YouTube session cookies from CF Worker
     if not tracks:
         raise Exception("No tracks found")
     
@@ -105,17 +106,15 @@ def fetch_via_cf_tracks(video_id, lang):
     if not selected:
         raise Exception("No matching track")
     
-    # Step 2: Fetch timedtext directly (Python requests has different TLS fingerprint)
+    # Step 2: Fetch timedtext WITH the YouTube session cookies from CF Worker
     base_url = selected["baseUrl"].replace("&fmt=srv3", "")
     
     session = requests.Session()
     session.headers.update({
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.5',
+        'Cookie': yt_cookies,  # Forward YouTube cookies from CF Worker session
     })
-    # Set consent cookies
-    session.cookies.set('SOCS', 'CAESEwgDEgk2NjE0MTEyNTQaAmVuIAEaBgiA_c28Bg', domain='.youtube.com')
-    session.cookies.set('CONSENT', 'PENDING+987', domain='.youtube.com')
     
     tt_resp = session.get(base_url, timeout=15)
     tt_resp.raise_for_status()
