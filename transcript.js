@@ -1,12 +1,9 @@
 /**
- * YouTube Transcript Fetcher — pure JS, cookie-aware.
- *
- * Strategy:
- *  1. Establish a YouTube session with proper CONSENT cookies
- *  2. Fetch the video page, extract caption track info from ytInitialPlayerResponse
- *  3. Fetch the actual caption data using the session cookies
- *
- * Falls back to yt-dlp if available.
+ * YouTube Transcript Fetcher
+ * 
+ * Uses a Cloudflare Worker proxy to route YouTube requests through
+ * Cloudflare edge IPs (bypasses datacenter IP blocking).
+ * Falls back to direct fetch + yt-dlp for local development.
  */
 
 const { execFile } = require('child_process');
@@ -14,33 +11,42 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// yt-dlp fallback detection
-let YT_DLP_CMD, YT_DLP_ARGS_PREFIX;
+// Cloudflare Worker proxy URL (routes requests through edge IPs)
+const PROXY_URL = 'https://yt-transcript-proxy.transcribeyoutubevideo.workers.dev';
+
+// Whether to use the proxy (always use in production to bypass bot detection)
+const USE_PROXY = true;
+
+// yt-dlp fallback detection (for local dev)
+let YT_DLP_CMD = null;
+try {
+    require('child_process').execFileSync('python3', ['-m', 'yt_dlp', '--version'], { timeout: 5000 });
+    YT_DLP_CMD = 'python3';
+} catch { /* yt-dlp not available */ }
+
 const localBin = path.join(__dirname, 'yt-dlp');
-if (fs.existsSync(localBin)) {
-    YT_DLP_CMD = localBin;
-    YT_DLP_ARGS_PREFIX = [];
-} else {
-    try {
-        require('child_process').execFileSync('python3', ['-m', 'yt_dlp', '--version'], { timeout: 5000 });
-        YT_DLP_CMD = 'python3';
-        YT_DLP_ARGS_PREFIX = ['-m', 'yt_dlp'];
-    } catch {
-        YT_DLP_CMD = null;
-        YT_DLP_ARGS_PREFIX = [];
-    }
-}
+if (fs.existsSync(localBin)) YT_DLP_CMD = localBin;
 
 const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
-const COOKIES_ARGS = fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : [];
 
 /**
- * Main entry point — tries pure JS first, falls back to yt-dlp.
+ * Fetch a URL, optionally through the Cloudflare proxy.
+ */
+async function proxyFetch(url, options = {}) {
+    if (USE_PROXY) {
+        const proxyUrl = PROXY_URL + '?url=' + encodeURIComponent(url);
+        return fetch(proxyUrl, options);
+    }
+    return fetch(url, options);
+}
+
+/**
+ * Main entry point — tries pure JS (via proxy) first, falls back to yt-dlp.
  */
 async function fetchTranscript(videoId, lang) {
     const errors = [];
 
-    // Strategy 1: Pure JS with innertube/timedtext
+    // Strategy 1: Pure JS with proxy
     try {
         const result = await jsTranscript(videoId, lang);
         if (result && result.transcript.length > 0) return result;
@@ -48,7 +54,7 @@ async function fetchTranscript(videoId, lang) {
         errors.push('js: ' + e.message);
     }
 
-    // Strategy 2: yt-dlp (if available)
+    // Strategy 2: yt-dlp (for local dev)
     if (YT_DLP_CMD) {
         try {
             const result = await ytdlpTranscript(videoId, lang);
@@ -62,47 +68,30 @@ async function fetchTranscript(videoId, lang) {
     throw new Error('CAPTIONS_UNAVAILABLE');
 }
 
-// ─── Strategy 1: Pure JS ────────────────────────────────────────
+// ─── Strategy 1: Pure JS via Cloudflare proxy ───────────────────
 
 async function jsTranscript(videoId, preferredLang) {
-    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const videoUrl = 'https://www.youtube.com/watch?v=' + videoId;
 
-    // Step 1: Fetch video page with proper cookie handling
-    // YouTube serves a consent page without the right cookies.
-    // We need to set SOCS cookie or CONSENT cookie to bypass it.
     const headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        // SOCS cookie to bypass consent in EU/GDPR regions
         'Cookie': 'SOCS=CAESEwgDEgk2NjE0MTEyNTQaAmVuIAEaBgiA_c28Bg; CONSENT=PENDING+987',
     };
 
-    const pageRes = await fetch(videoUrl, { headers, redirect: 'follow' });
-    if (!pageRes.ok) throw new Error(`Page fetch failed: ${pageRes.status}`);
+    // Fetch video page (through proxy if enabled)
+    const pageRes = await proxyFetch(videoUrl, { headers, redirect: 'follow' });
+    if (!pageRes.ok) throw new Error('Page fetch failed: ' + pageRes.status);
 
     const html = await pageRes.text();
 
-    // Collect Set-Cookie headers for subsequent requests
-    const responseCookies = pageRes.headers.getSetCookie?.() || [];
-    const cookieStr = [
-        'SOCS=CAESEwgDEgk2NjE0MTEyNTQaAmVuIAEaBgiA_c28Bg',
-        'CONSENT=PENDING+987',
-        ...responseCookies.map(c => c.split(';')[0])
-    ].join('; ');
-
-    // Step 2: Extract ytInitialPlayerResponse
+    // Extract ytInitialPlayerResponse
     const playerMatch = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s);
     if (!playerMatch) throw new Error('No player response found');
 
-    let playerResponse;
-    try {
-        playerResponse = JSON.parse(playerMatch[1]);
-    } catch {
-        throw new Error('Failed to parse player response');
-    }
+    const playerResponse = JSON.parse(playerMatch[1]);
 
-    // Check for playability errors (bot detection, geo-restriction, etc.)
     const playability = playerResponse?.playabilityStatus;
     if (playability?.status === 'ERROR' || playability?.status === 'UNPLAYABLE') {
         throw new Error(playability?.reason || 'Video unavailable');
@@ -113,25 +102,21 @@ async function jsTranscript(videoId, preferredLang) {
         throw new Error('CAPTIONS_UNAVAILABLE');
     }
 
-    // Step 3: Pick best track
     const track = pickTrack(captionTracks, preferredLang);
 
-    // Step 4: Build absolute URL
     let baseUrl = track.baseUrl;
     if (baseUrl.startsWith('/')) {
         baseUrl = 'https://www.youtube.com' + baseUrl;
     }
 
-    // Step 5: Fetch caption data (try json3, then XML)
     const captionHeaders = {
         ...headers,
-        'Cookie': cookieStr,
         'Referer': videoUrl,
     };
 
-    // Try json3 format
+    // Try json3 format (through proxy)
     const json3Url = baseUrl + '&fmt=json3';
-    const json3Res = await fetch(json3Url, { headers: captionHeaders, redirect: 'follow' });
+    const json3Res = await proxyFetch(json3Url, { headers: captionHeaders, redirect: 'follow' });
     if (json3Res.ok) {
         const text = await json3Res.text();
         if (text.length > 10) {
@@ -145,8 +130,8 @@ async function jsTranscript(videoId, preferredLang) {
         }
     }
 
-    // Try XML format
-    const xmlRes = await fetch(baseUrl, { headers: captionHeaders, redirect: 'follow' });
+    // Try XML format (through proxy)
+    const xmlRes = await proxyFetch(baseUrl, { headers: captionHeaders, redirect: 'follow' });
     if (xmlRes.ok) {
         const xml = await xmlRes.text();
         if (xml.length > 10) {
@@ -203,28 +188,14 @@ function parseXml(xml) {
 // ─── Strategy 2: yt-dlp fallback ────────────────────────────────
 
 async function ytdlpTranscript(videoId, lang) {
-    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const videoUrl = 'https://www.youtube.com/watch?v=' + videoId;
+    const ytdlpArgs = YT_DLP_CMD === 'python3' ? ['-m', 'yt_dlp'] : [];
+    const cookiesArgs = fs.existsSync(COOKIES_FILE) ? ['--cookies', COOKIES_FILE] : [];
 
-    // Phase 1: list subs
-    const tracks = await listSubtitles(videoUrl);
-    if (tracks.manual.length === 0 && tracks.auto.length === 0) {
-        throw new Error('CAPTIONS_UNAVAILABLE');
-    }
-
-    const { selectedLang, isAuto } = pickBestYtdlpTrack(tracks, lang);
-
-    // Phase 2: download
-    return downloadSubtitle(videoId, videoUrl, selectedLang, isAuto);
-}
-
-function listSubtitles(videoUrl) {
-    return new Promise((resolve, reject) => {
-        const args = [
-            ...YT_DLP_ARGS_PREFIX, ...COOKIES_ARGS,
-            '--no-check-certificates', '--list-subs', '--skip-download', videoUrl,
-        ];
+    const tracks = await new Promise((resolve, reject) => {
+        const args = [...ytdlpArgs, ...cookiesArgs, '--no-check-certificates', '--list-subs', '--skip-download', videoUrl];
         execFile(YT_DLP_CMD, args, { timeout: 30000 }, (error, stdout, stderr) => {
-            if (error && !stdout && !stderr) return reject(new Error('yt-dlp failed: ' + error.message));
+            if (error && !stdout && !stderr) return reject(new Error('yt-dlp failed'));
             const combined = (stdout || '') + '\n' + (stderr || '');
             const lines = combined.split('\n');
             const manual = [], auto = [];
@@ -232,7 +203,6 @@ function listSubtitles(videoUrl) {
             for (const line of lines) {
                 if (line.includes('Available subtitles for')) { section = 'manual'; continue; }
                 if (line.includes('Available automatic captions for')) { section = 'auto'; continue; }
-                if (line.includes('has no subtitles') || line.includes('has no automatic captions')) continue;
                 if (line.startsWith('Language') || line.startsWith('---')) continue;
                 if (section) {
                     const match = line.match(/^([a-zA-Z\-]+)\s+/);
@@ -244,40 +214,32 @@ function listSubtitles(videoUrl) {
             resolve({ manual, auto });
         });
     });
-}
 
-function pickBestYtdlpTrack(tracks, preferredLang) {
+    if (tracks.manual.length === 0 && tracks.auto.length === 0) throw new Error('CAPTIONS_UNAVAILABLE');
+
+    // Pick best track
     const origTrack = tracks.auto.find(l => l.endsWith('-orig'));
     const origLang = origTrack ? origTrack.replace(/-orig$/, '') : null;
+    let selectedLang, isAuto;
     if (origTrack) {
-        if (tracks.manual.includes(origLang)) return { selectedLang: origLang, isAuto: false };
-        return { selectedLang: origTrack, isAuto: true };
-    }
-    if (preferredLang) {
-        if (tracks.manual.includes(preferredLang)) return { selectedLang: preferredLang, isAuto: false };
-        if (tracks.auto.includes(preferredLang)) return { selectedLang: preferredLang, isAuto: true };
-    }
-    if (tracks.manual.length > 0) return { selectedLang: tracks.manual[0], isAuto: false };
-    if (tracks.auto.length > 0) {
-        const base = tracks.auto.filter(l => /^[a-z]{2,3}$/.test(l));
-        if (base.length > 0) return { selectedLang: base[0], isAuto: true };
-        return { selectedLang: tracks.auto[0], isAuto: true };
-    }
-    throw new Error('CAPTIONS_UNAVAILABLE');
-}
+        if (tracks.manual.includes(origLang)) { selectedLang = origLang; isAuto = false; }
+        else { selectedLang = origTrack; isAuto = true; }
+    } else if (lang && tracks.manual.includes(lang)) { selectedLang = lang; isAuto = false; }
+    else if (lang && tracks.auto.includes(lang)) { selectedLang = lang; isAuto = true; }
+    else if (tracks.manual.length > 0) { selectedLang = tracks.manual[0]; isAuto = false; }
+    else { selectedLang = tracks.auto[0]; isAuto = true; }
 
-function downloadSubtitle(videoId, videoUrl, lang, isAuto) {
+    // Download subtitle
     return new Promise((resolve, reject) => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'yt-transcript-'));
         const outTemplate = path.join(tmpDir, 'sub');
         const args = [
-            ...YT_DLP_ARGS_PREFIX, ...COOKIES_ARGS,
-            '--no-check-certificates',
+            ...ytdlpArgs, ...cookiesArgs, '--no-check-certificates',
             isAuto ? '--write-auto-sub' : '--write-sub',
-            '--sub-lang', lang, '--sub-format', 'json3',
+            '--sub-lang', selectedLang, '--sub-format', 'json3',
             '--skip-download', '-o', outTemplate, videoUrl,
         ];
-        execFile(YT_DLP_CMD, args, { timeout: 45000 }, (error, stdout, stderr) => {
+        execFile(YT_DLP_CMD, args, { timeout: 45000 }, () => {
             try {
                 const files = fs.readdirSync(tmpDir);
                 const subFile = files.find(f => f.endsWith('.json3'));
@@ -287,8 +249,8 @@ function downloadSubtitle(videoId, videoUrl, lang, isAuto) {
                 const transcript = parseJson3(json);
                 cleanup(tmpDir);
                 const langMatch = subFile.match(/\.([a-zA-Z\-]+)\.json3$/);
-                resolve({ transcript, language: langMatch ? langMatch[1] : lang });
-            } catch (e) {
+                resolve({ transcript, language: langMatch ? langMatch[1] : selectedLang });
+            } catch {
                 cleanup(tmpDir);
                 reject(new Error('CAPTIONS_PARSE_ERROR'));
             }
