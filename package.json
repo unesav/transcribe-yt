@@ -1,0 +1,18 @@
+{
+  "name": "youtube-transcript-clone",
+  "version": "1.0.0",
+  "description": "A YouTube transcript extraction tool",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "ejs": "^4.0.1",
+    "express": "^4.21.0",
+    "youtube-caption-extractor": "^1.9.1",
+    "youtube-captions-scraper": "^2.0.3",
+    "youtube-transcript": "^1.2.1",
+    "youtubei.js": "^16.0.1"
+  }
+}
