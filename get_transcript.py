@@ -29,7 +29,16 @@ def main():
             VideoUnavailable,
             NoTranscriptAvailable,
         )
-    except ImportError:
+    except ImportError as ie:
+        import sys as _s
+        _s.stderr.write(f"ImportError: {ie}\n")
+        _s.stderr.write(f"sys.path: {_s.path}\n")
+        _s.stderr.write(f"PYTHONPATH: {os.environ.get('PYTHONPATH', 'NOT SET')}\n")
+        _s.stderr.write(f"__file__: {os.path.abspath(__file__)}\n")
+        _s.stderr.write(f"python_libs dir: {_libs_dir}\n")
+        _s.stderr.write(f"python_libs exists: {os.path.isdir(_libs_dir)}\n")
+        if os.path.isdir(_libs_dir):
+            _s.stderr.write(f"python_libs contents: {os.listdir(_libs_dir)[:10]}\n")
         print(json.dumps({"error": "youtube-transcript-api not installed"}))
         sys.exit(1)
     

@@ -65,7 +65,7 @@ function pythonTranscript(videoId, lang) {
         const pythonEnv = { ...process.env, PYTHONPATH: pythonLibs + (process.env.PYTHONPATH ? ':' + process.env.PYTHONPATH : '') };
 
         execFile('python3', args, { timeout: 30000, maxBuffer: 10 * 1024 * 1024, cwd: __dirname, env: pythonEnv }, (error, stdout, stderr) => {
-            if (stderr) console.error('Python stderr:', stderr.substring(0, 200));
+            if (stderr) console.error('Python stderr:', stderr.substring(0, 1000));
 
             if (!stdout || stdout.trim().length === 0) {
                 return reject(new Error('Python script returned no output'));
