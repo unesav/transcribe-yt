@@ -4,3 +4,4 @@ dist/
 .DS_Store
 *.log
 index.html.bak
+python_libs/

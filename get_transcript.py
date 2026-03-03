@@ -5,7 +5,13 @@ Called from Node.js via child_process.
 Output: JSON to stdout.
 """
 import sys
+import os
 import json
+
+# Add local python_libs to path (installed by build.sh on Render)
+_libs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python_libs')
+if os.path.isdir(_libs_dir) and _libs_dir not in sys.path:
+    sys.path.insert(0, _libs_dir)
 
 def main():
     if len(sys.argv) < 2:
