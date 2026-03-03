@@ -27,7 +27,6 @@ def main():
             TranscriptsDisabled,
             NoTranscriptFound,
             VideoUnavailable,
-            NoTranscriptAvailable,
         )
     except ImportError as ie:
         import sys as _s
@@ -122,9 +121,6 @@ def main():
         sys.exit(1)
     except VideoUnavailable:
         print(json.dumps({"error": "VIDEO_UNAVAILABLE"}))
-        sys.exit(1)
-    except NoTranscriptAvailable:
-        print(json.dumps({"error": "CAPTIONS_UNAVAILABLE"}))
         sys.exit(1)
     except Exception as e:
         print(json.dumps({"error": str(e)}))
