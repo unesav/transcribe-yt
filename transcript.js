@@ -61,7 +61,10 @@ function pythonTranscript(videoId, lang) {
         const args = [PY_SCRIPT, videoId];
         if (lang) args.push(lang);
 
-        execFile('python3', args, { timeout: 30000, maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+        const pythonLibs = path.join(__dirname, 'python_libs');
+        const pythonEnv = { ...process.env, PYTHONPATH: pythonLibs + (process.env.PYTHONPATH ? ':' + process.env.PYTHONPATH : '') };
+
+        execFile('python3', args, { timeout: 30000, maxBuffer: 10 * 1024 * 1024, cwd: __dirname, env: pythonEnv }, (error, stdout, stderr) => {
             if (stderr) console.error('Python stderr:', stderr.substring(0, 200));
 
             if (!stdout || stdout.trim().length === 0) {
