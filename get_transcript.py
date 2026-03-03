@@ -13,6 +13,27 @@ _libs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'python_lib
 if os.path.isdir(_libs_dir) and _libs_dir not in sys.path:
     sys.path.insert(0, _libs_dir)
 
+# Cloudflare Worker proxy URL for bypassing YouTube IP blocks
+PROXY_URL = "https://yt-transcript-proxy.transcribeyoutubevideo.workers.dev"
+
+def create_proxied_session():
+    """Create a requests.Session that routes YouTube requests through CF Worker."""
+    import requests
+    from urllib.parse import quote
+    
+    class ProxiedAdapter(requests.adapters.HTTPAdapter):
+        def send(self, request, **kwargs):
+            original_url = request.url
+            # Route YouTube requests through our CF Worker proxy
+            if "youtube.com" in original_url or "youtu.be" in original_url:
+                request.url = PROXY_URL + "/?url=" + quote(original_url, safe='')
+            return super().send(request, **kwargs)
+    
+    session = requests.Session()
+    session.mount("https://", ProxiedAdapter())
+    session.mount("http://", ProxiedAdapter())
+    return session
+
 def main():
     if len(sys.argv) < 2:
         print(json.dumps({"error": "Missing video_id"}))
@@ -29,102 +50,97 @@ def main():
             VideoUnavailable,
         )
     except ImportError as ie:
-        import sys as _s
-        _s.stderr.write(f"ImportError: {ie}\n")
-        _s.stderr.write(f"sys.path: {_s.path}\n")
-        _s.stderr.write(f"PYTHONPATH: {os.environ.get('PYTHONPATH', 'NOT SET')}\n")
-        _s.stderr.write(f"__file__: {os.path.abspath(__file__)}\n")
-        _s.stderr.write(f"python_libs dir: {_libs_dir}\n")
-        _s.stderr.write(f"python_libs exists: {os.path.isdir(_libs_dir)}\n")
-        if os.path.isdir(_libs_dir):
-            _s.stderr.write(f"python_libs contents: {os.listdir(_libs_dir)[:10]}\n")
+        sys.stderr.write(f"ImportError: {ie}\n")
         print(json.dumps({"error": "youtube-transcript-api not installed"}))
         sys.exit(1)
     
     try:
-        api = YouTubeTranscriptApi()
-        
-        # List available transcripts
-        transcript_list = api.list(video_id)
-        
-        # Collect all available transcripts
-        manual_transcripts = []
-        generated_transcripts = []
-        
-        for t in transcript_list:
-            if t.is_generated:
-                generated_transcripts.append(t)
-            else:
-                manual_transcripts.append(t)
-        
-        # Pick the best transcript with priority:
-        # 1) Requested language (manual)
-        # 2) Requested language (generated)
-        # 3) Any manual transcript
-        # 4) Any generated transcript
-        transcript = None
-        
-        if lang:
-            # Try exact match first
-            for t in manual_transcripts:
-                if t.language_code == lang:
-                    transcript = t
-                    break
-            if not transcript:
-                for t in generated_transcripts:
-                    if t.language_code == lang:
-                        transcript = t
-                        break
-            # Try prefix match (e.g., "fr" matches "fr-FR")
-            if not transcript:
-                for t in manual_transcripts:
-                    if t.language_code.startswith(lang) or lang.startswith(t.language_code):
-                        transcript = t
-                        break
-            if not transcript:
-                for t in generated_transcripts:
-                    if t.language_code.startswith(lang) or lang.startswith(t.language_code):
-                        transcript = t
-                        break
-        
-        # If no specific language found or none requested, take the first available
-        if not transcript:
-            if manual_transcripts:
-                transcript = manual_transcripts[0]
-            elif generated_transcripts:
-                transcript = generated_transcripts[0]
-        
-        if transcript is None:
-            print(json.dumps({"error": "CAPTIONS_UNAVAILABLE"}))
-            sys.exit(1)
-        
-        # Fetch the transcript data
-        fetched = transcript.fetch()
-        segments = []
-        for snippet in fetched:
-            text = snippet.text.replace("\n", " ").strip()
-            if text:
-                segments.append({
-                    "text": text,
-                    "offset": snippet.start,
-                    "duration": snippet.duration,
-                })
-        
-        result = {
-            "transcript": segments,
-            "language": transcript.language_code,
-        }
-        print(json.dumps(result))
-        
-    except TranscriptsDisabled:
-        print(json.dumps({"error": "CAPTIONS_UNAVAILABLE"}))
-        sys.exit(1)
-    except VideoUnavailable:
-        print(json.dumps({"error": "VIDEO_UNAVAILABLE"}))
-        sys.exit(1)
+        # Try direct first (works for manual subtitles on any IP)
+        api_direct = YouTubeTranscriptApi()
+        result = try_fetch(api_direct, video_id, lang)
+        if result:
+            print(json.dumps(result))
+            return
     except Exception as e:
-        print(json.dumps({"error": str(e)}))
-        sys.exit(1)
+        sys.stderr.write(f"Direct attempt failed: {e}\n")
+    
+    try:
+        # Fall back to proxied session for IP-blocked requests
+        session = create_proxied_session()
+        api_proxied = YouTubeTranscriptApi(http_client=session)
+        result = try_fetch(api_proxied, video_id, lang)
+        if result:
+            print(json.dumps(result))
+            return
+    except Exception as e:
+        sys.stderr.write(f"Proxied attempt failed: {e}\n")
+    
+    print(json.dumps({"error": "CAPTIONS_UNAVAILABLE"}))
+    sys.exit(1)
+
+def try_fetch(api, video_id, lang):
+    """Try fetching transcript with the given API instance. Returns dict or None."""
+    try:
+        transcript_list = api.list(video_id)
+    except Exception:
+        return None
+    
+    manual_transcripts = []
+    generated_transcripts = []
+    
+    for t in transcript_list:
+        if t.is_generated:
+            generated_transcripts.append(t)
+        else:
+            manual_transcripts.append(t)
+    
+    # Pick best transcript
+    transcript = None
+    
+    if lang:
+        for t in manual_transcripts:
+            if t.language_code == lang:
+                transcript = t; break
+        if not transcript:
+            for t in generated_transcripts:
+                if t.language_code == lang:
+                    transcript = t; break
+        if not transcript:
+            for t in manual_transcripts:
+                if t.language_code.startswith(lang) or lang.startswith(t.language_code):
+                    transcript = t; break
+        if not transcript:
+            for t in generated_transcripts:
+                if t.language_code.startswith(lang) or lang.startswith(t.language_code):
+                    transcript = t; break
+    
+    if not transcript:
+        if manual_transcripts:
+            transcript = manual_transcripts[0]
+        elif generated_transcripts:
+            transcript = generated_transcripts[0]
+    
+    if transcript is None:
+        return None
+    
+    fetched = transcript.fetch()
+    segments = []
+    for snippet in fetched:
+        text = snippet.text.replace("\n", " ").strip()
+        if text:
+            segments.append({
+                "text": text,
+                "offset": snippet.start,
+                "duration": snippet.duration,
+            })
+    
+    if not segments:
+        return None
+    
+    return {
+        "transcript": segments,
+        "language": transcript.language_code,
+    }
 
 if __name__ == "__main__":
     main()
