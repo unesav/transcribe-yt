@@ -22,6 +22,12 @@ if (fs.existsSync(localBin)) {
     YT_DLP_ARGS_PREFIX = ['-m', 'yt_dlp'];
 }
 
+// Cookies file for authenticated YouTube requests (bypasses bot detection on server IPs)
+const COOKIES_FILE = path.join(__dirname, 'cookies.txt');
+const COOKIES_ARGS = fs.existsSync(COOKIES_FILE)
+    ? ['--cookies', COOKIES_FILE]
+    : [];
+
 /**
  * Fetch transcript for a YouTube video using yt-dlp.
  * 
@@ -66,6 +72,7 @@ function listSubtitles(videoUrl) {
     return new Promise((resolve, reject) => {
         const args = [
             ...YT_DLP_ARGS_PREFIX,
+            ...COOKIES_ARGS,
             '--no-check-certificates',
             '--list-subs',
             '--skip-download',
@@ -175,6 +182,7 @@ function downloadSubtitle(videoId, videoUrl, lang, isAuto) {
 
         const args = [
             ...YT_DLP_ARGS_PREFIX,
+            ...COOKIES_ARGS,
             '--no-check-certificates',
             isAuto ? '--write-auto-sub' : '--write-sub',
             '--sub-lang', lang,
