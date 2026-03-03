@@ -1,5 +1,5 @@
 /**
- * YouTube Transcript Fetcher using yt-dlp.
+ * YouTube Transcript Fetcher using yt-dlp standalone binary.
  * 
  * Language-agnostic: auto-detects available caption tracks via --list-subs,
  * then downloads the best available track. Falls back from manual → auto-generated.
@@ -9,6 +9,18 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+
+// Detect yt-dlp: standalone binary in project dir, system binary, or Python module
+let YT_DLP_CMD, YT_DLP_ARGS_PREFIX;
+const localBin = path.join(__dirname, 'yt-dlp');
+if (fs.existsSync(localBin)) {
+    YT_DLP_CMD = localBin;
+    YT_DLP_ARGS_PREFIX = [];
+} else {
+    // Fall back to python3 -m yt_dlp (works on machines with pip-installed yt-dlp)
+    YT_DLP_CMD = 'python3';
+    YT_DLP_ARGS_PREFIX = ['-m', 'yt_dlp'];
+}
 
 /**
  * Fetch transcript for a YouTube video using yt-dlp.
@@ -53,14 +65,18 @@ async function fetchTranscript(videoId, lang) {
 function listSubtitles(videoUrl) {
     return new Promise((resolve, reject) => {
         const args = [
-            '-m', 'yt_dlp',
+            ...YT_DLP_ARGS_PREFIX,
             '--no-check-certificates',
             '--list-subs',
             '--skip-download',
             videoUrl,
         ];
 
-        execFile('python3', args, { timeout: 30000 }, (error, stdout, stderr) => {
+        execFile(YT_DLP_CMD, args, { timeout: 30000 }, (error, stdout, stderr) => {
+            if (error && !stdout && !stderr) {
+                return reject(new Error('yt-dlp execution failed: ' + error.message));
+            }
+
             const combined = (stdout || '') + '\n' + (stderr || '');
             const lines = combined.split('\n');
 
@@ -109,18 +125,6 @@ function listSubtitles(videoUrl) {
 
 /**
  * Pick the best subtitle track to download.
- * 
- * KEY INSIGHT: yt-dlp marks the video's original language with a "-orig"
- * suffix (e.g. "es-orig" for a Spanish video). This MUST be prioritized
- * to avoid returning translated captions instead of the original.
- * 
- * Priority:
- *  1. Auto-generated -orig track (the video's actual language)
- *  2. Manual subs in the detected original language
- *  3. Manual subs in preferred language (if specified)
- *  4. Auto subs in preferred language (if specified)
- *  5. First manual sub (any language)
- *  6. Best available auto sub
  */
 function pickBestTrack(tracks, preferredLang) {
     // Step 1: Detect the original language from auto tracks
@@ -129,11 +133,9 @@ function pickBestTrack(tracks, preferredLang) {
 
     // Step 2: If we found the original language, prioritize it
     if (origTrack) {
-        // 2a. Check if manual subs exist in the original language
         if (tracks.manual.includes(origLang)) {
             return { selectedLang: origLang, isAuto: false };
         }
-        // 2b. Use the -orig auto track directly
         return { selectedLang: origTrack, isAuto: true };
     }
 
@@ -147,21 +149,16 @@ function pickBestTrack(tracks, preferredLang) {
         }
     }
 
-    // Step 4: No preferred language, no -orig. Pick the best available.
-    // Prefer manual subs over auto.
+    // Step 4: Pick the best available.
     if (tracks.manual.length > 0) {
         return { selectedLang: tracks.manual[0], isAuto: false };
     }
 
-    // Step 5: Auto subs — pick the first plain (non-translated) lang code.
-    // Translated tracks have format "xx-yy" (e.g. "es-en-US"), while
-    // base tracks are just "xx" (e.g. "en", "fr").
     if (tracks.auto.length > 0) {
         const baseTracks = tracks.auto.filter(l => /^[a-z]{2,3}$/.test(l));
         if (baseTracks.length > 0) {
             return { selectedLang: baseTracks[0], isAuto: true };
         }
-        // Last resort
         return { selectedLang: tracks.auto[0], isAuto: true };
     }
 
@@ -177,7 +174,7 @@ function downloadSubtitle(videoId, videoUrl, lang, isAuto) {
         const outTemplate = path.join(tmpDir, 'sub');
 
         const args = [
-            '-m', 'yt_dlp',
+            ...YT_DLP_ARGS_PREFIX,
             '--no-check-certificates',
             isAuto ? '--write-auto-sub' : '--write-sub',
             '--sub-lang', lang,
@@ -187,7 +184,7 @@ function downloadSubtitle(videoId, videoUrl, lang, isAuto) {
             videoUrl,
         ];
 
-        execFile('python3', args, { timeout: 45000 }, (error, stdout, stderr) => {
+        execFile(YT_DLP_CMD, args, { timeout: 45000 }, (error, stdout, stderr) => {
             try {
                 const files = fs.readdirSync(tmpDir);
                 const subFile = files.find(f => f.endsWith('.json3'));
