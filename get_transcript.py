@@ -33,39 +33,52 @@ def main():
         # List available transcripts
         transcript_list = api.list(video_id)
         
-        # Try to find the best transcript
+        # Collect all available transcripts
+        manual_transcripts = []
+        generated_transcripts = []
+        
+        for t in transcript_list:
+            if t.is_generated:
+                generated_transcripts.append(t)
+            else:
+                manual_transcripts.append(t)
+        
+        # Pick the best transcript with priority:
+        # 1) Requested language (manual)
+        # 2) Requested language (generated)
+        # 3) Any manual transcript
+        # 4) Any generated transcript
         transcript = None
-        selected_lang = None
         
-        # Priority: 1) requested language manual, 2) requested language auto,
-        # 3) any manual, 4) any auto
         if lang:
-            try:
-                transcript = transcript_list.find_transcript([lang])
-                selected_lang = transcript.language_code
-            except NoTranscriptFound:
-                pass
-        
-        if transcript is None:
-            # Try to find any manually created transcript
-            try:
-                for t in transcript_list:
-                    if not t.is_generated:
-                        transcript = t
-                        selected_lang = t.language_code
-                        break
-            except Exception:
-                pass
-        
-        if transcript is None:
-            # Fall back to any generated transcript
-            try:
-                for t in transcript_list:
+            # Try exact match first
+            for t in manual_transcripts:
+                if t.language_code == lang:
                     transcript = t
-                    selected_lang = t.language_code
                     break
-            except Exception:
-                pass
+            if not transcript:
+                for t in generated_transcripts:
+                    if t.language_code == lang:
+                        transcript = t
+                        break
+            # Try prefix match (e.g., "fr" matches "fr-FR")
+            if not transcript:
+                for t in manual_transcripts:
+                    if t.language_code.startswith(lang) or lang.startswith(t.language_code):
+                        transcript = t
+                        break
+            if not transcript:
+                for t in generated_transcripts:
+                    if t.language_code.startswith(lang) or lang.startswith(t.language_code):
+                        transcript = t
+                        break
+        
+        # If no specific language found or none requested, take the first available
+        if not transcript:
+            if manual_transcripts:
+                transcript = manual_transcripts[0]
+            elif generated_transcripts:
+                transcript = generated_transcripts[0]
         
         if transcript is None:
             print(json.dumps({"error": "CAPTIONS_UNAVAILABLE"}))
@@ -75,15 +88,17 @@ def main():
         fetched = transcript.fetch()
         segments = []
         for snippet in fetched:
-            segments.append({
-                "text": snippet.text.replace("\n", " ").strip(),
-                "offset": snippet.start,
-                "duration": snippet.duration,
-            })
+            text = snippet.text.replace("\n", " ").strip()
+            if text:
+                segments.append({
+                    "text": text,
+                    "offset": snippet.start,
+                    "duration": snippet.duration,
+                })
         
         result = {
             "transcript": segments,
-            "language": selected_lang,
+            "language": transcript.language_code,
         }
         print(json.dumps(result))
         
