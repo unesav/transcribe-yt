@@ -67,13 +67,13 @@ def main():
 
 def fetch_via_cf_tracks(video_id, lang):
     """
-    Get captionTracks from CF Worker (bypasses IP block on page),
-    then fetch timedtext content directly with requests (different TLS fingerprint).
+    Get captionTracks from CF Worker (mobile YouTube bypasses IP block),
+    then fetch timedtext content through CF Worker proxy (bypasses timedtext IP block).
     """
     import requests
-    from xml.etree import ElementTree
+    from urllib.parse import quote
     
-    # Step 1: Get tracks + session cookies from CF Worker
+    # Step 1: Get tracks from CF Worker (uses mobile YouTube)
     resp = requests.get(f"{CF_WORKER_URL}/", params={"videoId": video_id, "mode": "tracks"}, timeout=15)
     resp.raise_for_status()
     data = resp.json()
@@ -82,7 +82,6 @@ def fetch_via_cf_tracks(video_id, lang):
         raise Exception(data["error"])
     
     tracks = data.get("tracks", [])
-    yt_cookies = data.get("cookies", "")  # YouTube session cookies from CF Worker
     if not tracks:
         raise Exception("No tracks found")
     
@@ -106,31 +105,42 @@ def fetch_via_cf_tracks(video_id, lang):
     if not selected:
         raise Exception("No matching track")
     
-    # Step 2: Fetch timedtext WITH the YouTube session cookies from CF Worker
-    base_url = selected["baseUrl"].replace("&fmt=srv3", "")
+    # Step 2: Fetch timedtext through CF Worker proxy (bypasses IP blocking)
+    base_url = selected["baseUrl"]
     
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Cookie': yt_cookies,  # Forward YouTube cookies from CF Worker session
-    })
+    # Try XML format first via CF Worker proxy
+    xml_url = base_url.replace("&fmt=srv3", "") 
+    proxied_url = f"{CF_WORKER_URL}/?url={quote(xml_url, safe='')}"
+    sys.stderr.write(f"Fetching timedtext via CF proxy: {selected['languageCode']} ({selected.get('kind','manual')})\n")
     
-    tt_resp = session.get(base_url, timeout=15)
+    tt_resp = requests.get(proxied_url, timeout=20)
     tt_resp.raise_for_status()
     xml_text = tt_resp.text
     
-    if not xml_text or len(xml_text.strip()) == 0:
-        # Try json3 format
-        j3_resp = session.get(base_url + "&fmt=json3", timeout=15)
-        j3_text = j3_resp.text
-        if j3_text and len(j3_text.strip()) > 0:
-            j3 = json.loads(j3_text)
-            return parse_json3(j3, selected["languageCode"])
-        raise Exception("Timedtext returned empty")
+    if xml_text and len(xml_text.strip()) > 10:
+        try:
+            result = parse_xml(xml_text, selected["languageCode"])
+            if result and result.get("transcript"):
+                return result
+        except Exception as xe:
+            sys.stderr.write(f"XML parse failed: {xe}\n")
     
-    # Parse XML
-    return parse_xml(xml_text, selected["languageCode"])
+    # Try json3 format via CF Worker proxy
+    j3_url = base_url.replace("&fmt=srv3", "") + "&fmt=json3"
+    proxied_j3 = f"{CF_WORKER_URL}/?url={quote(j3_url, safe='')}"
+    j3_resp = requests.get(proxied_j3, timeout=20)
+    j3_text = j3_resp.text
+    
+    if j3_text and len(j3_text.strip()) > 10:
+        try:
+            j3 = json.loads(j3_text)
+            result = parse_json3(j3, selected["languageCode"])
+            if result and result.get("transcript"):
+                return result
+        except Exception as je:
+            sys.stderr.write(f"JSON3 parse failed: {je}\n")
+    
+    raise Exception(f"Timedtext empty: xml={len(xml_text)}b json3={len(j3_text)}b")
 
 
 def parse_xml(xml_text, language_code):
