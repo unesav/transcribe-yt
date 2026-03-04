@@ -1,0 +1,10 @@
+# Railway Nixpacks configuration
+# Tells Nixpacks to include both Node.js and Python
+[phases.setup]
+nixPkgs = ["...", "python312", "python312Packages.pip"]
+
+[phases.install]
+cmds = ["npm install", "pip install --target ./python_libs youtube-transcript-api requests"]
+
+[start]
+cmd = "node server.js"
